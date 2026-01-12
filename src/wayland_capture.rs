@@ -1274,6 +1274,33 @@ impl WaylandCapture {
         }
     }
 
+    pub fn capture_output_with_scale_and_cursor(
+        &mut self,
+        output_name: &str,
+        scale: f64,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        self.refresh_outputs()?;
+        let snapshot = self.collect_outputs_snapshot();
+        let (_, info) = snapshot
+            .iter()
+            .find(|(_, info)| info.name == output_name)
+            .ok_or_else(|| Error::OutputNotFound(output_name.to_string()))?;
+
+        let region = Box::new(
+            info.logical_x,
+            info.logical_y,
+            info.logical_width,
+            info.logical_height,
+        );
+
+        if scale == 1.0 {
+            self.composite_region(region, &snapshot, overlay_cursor)
+        } else {
+            self.composite_region_scaled(region, &snapshot, overlay_cursor, scale)
+        }
+    }
+
     pub fn capture_region(&mut self, region: Box) -> Result<CaptureResult> {
         self.refresh_outputs()?;
         let snapshot = self.collect_outputs_snapshot();

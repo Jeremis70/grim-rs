@@ -479,6 +479,17 @@ impl Grim {
             .capture_output_with_scale(output_name, scale)
     }
 
+    /// Capture a specific output by name with specified scale factor and cursor inclusion.
+    pub fn capture_output_with_scale_and_cursor(
+        &mut self,
+        output_name: &str,
+        scale: f64,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        self.platform_capture_mut()?
+            .capture_output_with_scale_and_cursor(output_name, scale, overlay_cursor)
+    }
+
     /// Capture a specific region.
     ///
     /// Captures a screenshot of the specified rectangular region.

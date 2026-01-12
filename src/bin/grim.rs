@@ -1,4 +1,4 @@
-use grim_rs::{Box as GrimBox, CaptureParameters, Grim};
+use grim_rs::{Box as GrimBox, Grim};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead};
@@ -147,20 +147,7 @@ fn main() -> grim_rs::Result<()> {
 
     let result = if let Some(ref output_name) = opts.output_name {
         if opts.with_cursor {
-            let mut params =
-                CaptureParameters::new(output_name.clone()).overlay_cursor(opts.with_cursor);
-            if let Some(region) = opts.geometry {
-                params = params.region(region);
-            }
-            if let Some(scale) = opts.scale {
-                params = params.scale(scale);
-            }
-            let multi_result = grim.capture_outputs_with_scale(vec![params], default_scale)?;
-            if let Some(capture_result) = multi_result.get(output_name) {
-                capture_result.clone()
-            } else {
-                return Err(grim_rs::Error::OutputNotFound(output_name.clone()));
-            }
+            grim.capture_output_with_scale_and_cursor(output_name, default_scale, true)?
         } else {
             grim.capture_output_with_scale(output_name, default_scale)?
         }
