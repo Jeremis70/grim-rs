@@ -237,14 +237,27 @@ impl MultiOutputCaptureResult {
 /// Provides methods for capturing screenshots of the entire screen,
 /// specific outputs, regions, or multiple outputs with different parameters.
 pub struct Grim {
-    platform_capture: PlatformCapture,
+    platform_capture: Option<PlatformCapture>,
 }
 
 impl Grim {
+    fn platform_capture_mut(&mut self) -> Result<&mut PlatformCapture> {
+        if self.platform_capture.is_none() {
+            self.platform_capture = Some(PlatformCapture::new()?);
+        }
+
+        Ok(self
+            .platform_capture
+            .as_mut()
+            .expect("platform_capture must be initialized"))
+    }
+
     /// Create a new Grim instance.
     ///
-    /// Establishes a connection to the Wayland compositor and initializes
-    /// the necessary protocols for screen capture.
+    /// Initializes the Grim instance.
+    ///
+    /// The connection to the Wayland compositor is established lazily on the first call to a
+    /// capture- or output-related method.
     ///
     /// # Errors
     ///
@@ -264,8 +277,9 @@ impl Grim {
     /// # }
     /// ```
     pub fn new() -> Result<Self> {
-        let platform_capture = PlatformCapture::new()?;
-        Ok(Self { platform_capture })
+        Ok(Self {
+            platform_capture: None,
+        })
     }
 
     /// Get information about available display outputs.
@@ -293,7 +307,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn get_outputs(&mut self) -> Result<Vec<Output>> {
-        self.platform_capture.get_outputs()
+        self.platform_capture_mut()?.get_outputs()
     }
 
     /// Returns the greatest (possibly fractional) output scale factor.
@@ -320,7 +334,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn greatest_scale_for_region(&mut self, region: Option<Box>) -> Result<f64> {
-        self.platform_capture
+        self.platform_capture_mut()?
             .greatest_logical_scale_for_region(region)
     }
 
@@ -347,7 +361,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn capture_all(&mut self) -> Result<CaptureResult> {
-        self.platform_capture.capture_all()
+        self.platform_capture_mut()?.capture_all()
     }
 
     /// Capture the entire screen (all outputs) with specified scale factor.
@@ -377,7 +391,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn capture_all_with_scale(&mut self, scale: f64) -> Result<CaptureResult> {
-        self.platform_capture.capture_all_with_scale(scale)
+        self.platform_capture_mut()?.capture_all_with_scale(scale)
     }
 
     /// Capture a specific output by name.
@@ -410,7 +424,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn capture_output(&mut self, output_name: &str) -> Result<CaptureResult> {
-        self.platform_capture.capture_output(output_name)
+        self.platform_capture_mut()?.capture_output(output_name)
     }
 
     /// Capture a specific output by name with specified scale factor.
@@ -448,7 +462,7 @@ impl Grim {
         output_name: &str,
         scale: f64,
     ) -> Result<CaptureResult> {
-        self.platform_capture
+        self.platform_capture_mut()?
             .capture_output_with_scale(output_name, scale)
     }
 
@@ -480,7 +494,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn capture_region(&mut self, region: Box) -> Result<CaptureResult> {
-        self.platform_capture.capture_region(region)
+        self.platform_capture_mut()?.capture_region(region)
     }
 
     /// Capture a specific region with specified scale factor.
@@ -512,7 +526,7 @@ impl Grim {
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
     pub fn capture_region_with_scale(&mut self, region: Box, scale: f64) -> Result<CaptureResult> {
-        self.platform_capture
+        self.platform_capture_mut()?
             .capture_region_with_scale(region, scale)
     }
 
@@ -568,7 +582,7 @@ impl Grim {
         &mut self,
         parameters: Vec<CaptureParameters>,
     ) -> Result<MultiOutputCaptureResult> {
-        self.platform_capture.capture_outputs(parameters)
+        self.platform_capture_mut()?.capture_outputs(parameters)
     }
 
     /// Capture outputs with scale factor.
@@ -588,7 +602,7 @@ impl Grim {
         parameters: Vec<CaptureParameters>,
         default_scale: f64,
     ) -> Result<MultiOutputCaptureResult> {
-        self.platform_capture
+        self.platform_capture_mut()?
             .capture_outputs_with_scale(parameters, default_scale)
     }
 
@@ -1499,16 +1513,15 @@ mod tests {
         });
 
         match result {
-            Ok(capture_result) => {
-                if let Ok(capture) = capture_result {
-                    assert_eq!(
-                        capture.data.len(),
-                        (capture.width * capture.height * 4) as usize
-                    );
-                } else {
-                    assert!(matches!(capture_result, Err(Error::NoOutputs)));
-                }
+            Ok(Ok(capture)) => {
+                assert_eq!(
+                    capture.data.len(),
+                    (capture.width * capture.height * 4) as usize
+                );
             }
+            Ok(Err(Error::NoOutputs)) => (),
+            Ok(Err(Error::WaylandConnection(_))) => (),
+            Ok(Err(e)) => panic!("Unexpected error: {e:?}"),
             Err(_) => {
                 panic!("Test panicked unexpectedly");
             }
@@ -1571,8 +1584,9 @@ mod tests {
         let test_capture = grim.capture_all_with_scale(1.0);
         match test_capture {
             Ok(_) => {}
-            Err(Error::NoOutputs) => {}
-            Err(e) => panic!("Unexpected error: {:?}", e),
+            Err(Error::NoOutputs) => (),
+            Err(Error::WaylandConnection(_)) => (),
+            Err(e) => panic!("Unexpected error: {e:?}"),
         }
     }
 }
