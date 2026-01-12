@@ -1285,7 +1285,11 @@ impl WaylandCapture {
                     ))
                 })?;
 
-        let filter = if scale >= 0.75 {
+        let filter = if scale > 1.0 {
+            imageops::FilterType::Nearest
+        } else if scale >= 0.75 {
+            imageops::FilterType::Triangle
+        } else if scale >= 0.5 {
             imageops::FilterType::CatmullRom
         } else {
             imageops::FilterType::Lanczos3
