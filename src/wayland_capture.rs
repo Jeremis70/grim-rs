@@ -1285,9 +1285,7 @@ impl WaylandCapture {
                     ))
                 })?;
 
-        let filter = if scale >= 1.0 {
-            imageops::FilterType::CatmullRom
-        } else if scale >= 0.75 {
+        let filter = if scale >= 0.75 {
             imageops::FilterType::CatmullRom
         } else {
             imageops::FilterType::Lanczos3
