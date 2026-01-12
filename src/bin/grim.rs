@@ -165,7 +165,13 @@ fn main() -> grim_rs::Result<()> {
             grim.capture_output_with_scale(output_name, default_scale)?
         }
     } else if let Some(ref geometry) = opts.geometry {
-        grim.capture_region_with_scale(*geometry, default_scale)?
+        if opts.with_cursor {
+            grim.capture_region_with_scale_and_cursor(*geometry, default_scale, true)?
+        } else {
+            grim.capture_region_with_scale(*geometry, default_scale)?
+        }
+    } else if opts.with_cursor {
+        grim.capture_all_with_scale_and_cursor(default_scale, true)?
     } else {
         grim.capture_all_with_scale(default_scale)?
     };

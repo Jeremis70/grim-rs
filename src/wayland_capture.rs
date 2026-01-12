@@ -1204,6 +1204,38 @@ impl WaylandCapture {
         }
     }
 
+    pub fn capture_all_with_scale_and_cursor(
+        &mut self,
+        scale: f64,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        self.refresh_outputs()?;
+        let snapshot = self.collect_outputs_snapshot();
+        if snapshot.is_empty() {
+            return Err(Error::NoOutputs);
+        }
+
+        let (_, first_info) = &snapshot[0];
+        let mut min_x = first_info.logical_x;
+        let mut min_y = first_info.logical_y;
+        let mut max_x = first_info.logical_x + first_info.logical_width;
+        let mut max_y = first_info.logical_y + first_info.logical_height;
+
+        for (_, info) in &snapshot {
+            min_x = min_x.min(info.logical_x);
+            min_y = min_y.min(info.logical_y);
+            max_x = max_x.max(info.logical_x + info.logical_width);
+            max_y = max_y.max(info.logical_y + info.logical_height);
+        }
+
+        let region = Box::new(min_x, min_y, max_x - min_x, max_y - min_y);
+        if scale == 1.0 {
+            self.composite_region(region, &snapshot, overlay_cursor)
+        } else {
+            self.composite_region_scaled(region, &snapshot, overlay_cursor, scale)
+        }
+    }
+
     pub fn capture_output(&mut self, output_name: &str) -> Result<CaptureResult> {
         self.refresh_outputs()?;
         let snapshot = self.collect_outputs_snapshot();
@@ -1255,6 +1287,21 @@ impl WaylandCapture {
             self.composite_region(region, &snapshot, false)
         } else {
             self.composite_region_scaled(region, &snapshot, false, scale)
+        }
+    }
+
+    pub fn capture_region_with_scale_and_cursor(
+        &mut self,
+        region: Box,
+        scale: f64,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        self.refresh_outputs()?;
+        let snapshot = self.collect_outputs_snapshot();
+        if scale == 1.0 {
+            self.composite_region(region, &snapshot, overlay_cursor)
+        } else {
+            self.composite_region_scaled(region, &snapshot, overlay_cursor, scale)
         }
     }
 

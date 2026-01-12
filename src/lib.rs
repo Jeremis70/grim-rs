@@ -394,6 +394,19 @@ impl Grim {
         self.platform_capture_mut()?.capture_all_with_scale(scale)
     }
 
+    /// Capture the entire screen (all outputs) with specified scale factor and cursor inclusion.
+    ///
+    /// This is identical to [`Grim::capture_all_with_scale`], but lets you choose whether the
+    /// cursor is included.
+    pub fn capture_all_with_scale_and_cursor(
+        &mut self,
+        scale: f64,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        self.platform_capture_mut()?
+            .capture_all_with_scale_and_cursor(scale, overlay_cursor)
+    }
+
     /// Capture a specific output by name.
     ///
     /// Captures a screenshot of the specified display output.
@@ -528,6 +541,20 @@ impl Grim {
     pub fn capture_region_with_scale(&mut self, region: Box, scale: f64) -> Result<CaptureResult> {
         self.platform_capture_mut()?
             .capture_region_with_scale(region, scale)
+    }
+
+    /// Capture a specific region with specified scale factor and cursor inclusion.
+    ///
+    /// This is identical to [`Grim::capture_region_with_scale`], but lets you choose whether the
+    /// cursor is included.
+    pub fn capture_region_with_scale_and_cursor(
+        &mut self,
+        region: Box,
+        scale: f64,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        self.platform_capture_mut()?
+            .capture_region_with_scale_and_cursor(region, scale, overlay_cursor)
     }
 
     /// Capture multiple outputs with different parameters.
