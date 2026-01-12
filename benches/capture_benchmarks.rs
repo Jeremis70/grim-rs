@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use grim_rs::{Box as GrimBox, Grim};
 
 fn benchmark_capture_all(c: &mut Criterion) {
@@ -8,7 +8,7 @@ fn benchmark_capture_all(c: &mut Criterion) {
         b.iter(|| {
             let mut grim = Grim::new().expect("Failed to create Grim");
             let result = grim.capture_all().expect("Failed to capture");
-            black_box(result);
+            std::hint::black_box(result);
         });
     });
 
@@ -25,7 +25,7 @@ fn benchmark_capture_with_scale(c: &mut Criterion) {
                 let result = grim
                     .capture_all_with_scale(scale)
                     .expect("Failed to capture");
-                black_box(result);
+                std::hint::black_box(result);
             });
         });
     }
@@ -47,7 +47,7 @@ fn benchmark_capture_region(c: &mut Criterion) {
             b.iter(|| {
                 let mut grim = Grim::new().expect("Failed to create Grim");
                 let result = grim.capture_region(*region).expect("Failed to capture");
-                black_box(result);
+                std::hint::black_box(result);
             });
         });
     }
@@ -62,7 +62,7 @@ fn benchmark_get_outputs(c: &mut Criterion) {
         b.iter(|| {
             let mut grim = Grim::new().expect("Failed to create Grim");
             let outputs = grim.get_outputs().expect("Failed to get outputs");
-            black_box(outputs);
+            std::hint::black_box(outputs);
         });
     });
 

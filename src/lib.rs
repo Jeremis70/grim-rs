@@ -710,16 +710,16 @@ impl Grim {
         let mut encoder = png::Encoder::new(writer, width, height);
 
         let compression_level = match compression {
-            0 => png::Compression::Fast,
-            1..=3 => png::Compression::Best,
-            4..=6 => png::Compression::Default,
-            7..=9 => png::Compression::Best,
-            _ => png::Compression::Default,
+            0 => png::Compression::Fastest,
+            1..=3 => png::Compression::Fast,
+            4..=6 => png::Compression::Balanced,
+            7..=9 => png::Compression::High,
+            _ => png::Compression::Balanced,
         };
         encoder.set_compression(compression_level);
 
         encoder.set_color(png::ColorType::Rgba);
-        encoder.set_filter(png::FilterType::NoFilter);
+        encoder.set_filter(png::Filter::NoFilter);
 
         let mut writer = encoder
             .write_header()
@@ -1143,16 +1143,16 @@ impl Grim {
             let mut encoder = png::Encoder::new(writer, width, height);
 
             let compression_level = match compression {
-                0 => png::Compression::Fast,
-                1..=3 => png::Compression::Best,
-                4..=6 => png::Compression::Default,
-                7..=9 => png::Compression::Best,
-                _ => png::Compression::Default,
+                0 => png::Compression::Fastest,
+                1..=3 => png::Compression::Fast,
+                4..=6 => png::Compression::Balanced,
+                7..=9 => png::Compression::High,
+                _ => png::Compression::Balanced,
             };
             encoder.set_compression(compression_level);
 
             encoder.set_color(png::ColorType::Rgba);
-            encoder.set_filter(png::FilterType::NoFilter);
+            encoder.set_filter(png::Filter::NoFilter);
 
             let mut writer = encoder.write_header().map_err(|e| {
                 Error::Io(std::io::Error::other(format!("PNG encoding error: {}", e)))

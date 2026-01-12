@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use grim_rs::Grim;
 
 fn generate_test_data(width: u32, height: u32) -> Vec<u8> {
@@ -26,7 +26,7 @@ fn benchmark_png_encoding(c: &mut Criterion) {
                 let result = grim
                     .to_png(data, *width, *height)
                     .expect("Failed to encode PNG");
-                black_box(result);
+                std::hint::black_box(result);
             });
         });
     }
@@ -48,7 +48,7 @@ fn benchmark_png_compression_levels(c: &mut Criterion) {
                 let result = grim
                     .to_png_with_compression(&data, width, height, level)
                     .expect("Failed to encode PNG");
-                black_box(result);
+                std::hint::black_box(result);
             });
         });
     }
@@ -77,7 +77,7 @@ fn benchmark_jpeg_encoding(c: &mut Criterion) {
                 let result = grim
                     .to_jpeg(data, *width, *height)
                     .expect("Failed to encode JPEG");
-                black_box(result);
+                std::hint::black_box(result);
             });
         });
     }
@@ -103,7 +103,7 @@ fn benchmark_jpeg_quality_levels(c: &mut Criterion) {
                     let result = grim
                         .to_jpeg_with_quality(&data, width, height, quality)
                         .expect("Failed to encode JPEG");
-                    black_box(result);
+                    std::hint::black_box(result);
                 });
             },
         );
@@ -132,7 +132,7 @@ fn benchmark_ppm_encoding(c: &mut Criterion) {
                 let result = grim
                     .to_ppm(data, *width, *height)
                     .expect("Failed to encode PPM");
-                black_box(result);
+                std::hint::black_box(result);
             });
         });
     }
