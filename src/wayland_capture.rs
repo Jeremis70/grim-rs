@@ -216,6 +216,26 @@ fn guess_output_logical_geometry(info: &mut OutputInfo) {
         &mut info.logical_height,
     );
     info.logical_scale_known = true;
+    update_logical_scale(info);
+}
+
+/// Infer a (possibly fractional) logical scale.
+///
+/// Some compositors report a logical size that does not match the integer `wl_output.scale`.
+/// To match grim's behavior, we derive the effective scale from the physical mode size and the
+/// logical size (taking output transform into account).
+fn update_logical_scale(info: &mut OutputInfo) {
+    if info.width <= 0 || info.height <= 0 || info.logical_width <= 0 || info.logical_height <= 0 {
+        return;
+    }
+
+    // Match grim's behavior: infer a (possibly fractional) logical scale from the output's
+    // physical mode size and the xdg-output logical size.
+    let mut physical_width = info.width;
+    let mut physical_height = info.height;
+    apply_output_transform(info.transform, &mut physical_width, &mut physical_height);
+
+    info.logical_scale = (physical_width as f64) / (info.logical_width as f64);
 }
 
 fn blit_capture(
@@ -253,6 +273,46 @@ fn blit_capture(
     }
 }
 
+fn crop_rgba(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+) -> Result<CaptureResult> {
+    // Crop a packed RGBA buffer in row-major order.
+    if w == 0 || h == 0 {
+        return Err(Error::InvalidRegion(
+            "Crop dimensions must be positive".to_string(),
+        ));
+    }
+    if x >= width || y >= height {
+        return Err(Error::InvalidRegion(
+            "Crop origin is outside image".to_string(),
+        ));
+    }
+
+    let w = w.min(width - x);
+    let h = h.min(height - y);
+
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    let dst_stride = (w * 4) as usize;
+
+    for row in 0..h {
+        let src_off = ((y + row) * width + x) as usize * 4;
+        let dst_off = (row as usize) * dst_stride;
+        out[dst_off..dst_off + dst_stride].copy_from_slice(&data[src_off..src_off + dst_stride]);
+    }
+
+    Ok(CaptureResult {
+        data: out,
+        width: w,
+        height: h,
+    })
+}
+
 /// Check if outputs have overlapping regions.
 #[derive(Clone)]
 struct OutputInfo {
@@ -268,6 +328,7 @@ struct OutputInfo {
     logical_width: i32,
     logical_height: i32,
     logical_scale_known: bool,
+    logical_scale: f64,
     description: Option<String>,
 }
 
@@ -567,6 +628,186 @@ impl WaylandCapture {
         })
     }
 
+    fn capture_output_for_output(
+        &mut self,
+        output: &WlOutput,
+        overlay_cursor: bool,
+    ) -> Result<CaptureResult> {
+        let screencopy_manager =
+            self.globals
+                .screencopy_manager
+                .as_ref()
+                .ok_or(Error::UnsupportedProtocol(
+                    "zwlr_screencopy_manager_v1 not available".to_string(),
+                ))?;
+
+        let mut event_queue = self._connection.new_event_queue();
+        let qh = event_queue.handle();
+        let frame_state = Arc::new(Mutex::new(FrameState {
+            buffer: None,
+            width: 0,
+            height: 0,
+            format: None,
+            ready: false,
+            flags: 0,
+        }));
+
+        let frame = screencopy_manager.capture_output(
+            if overlay_cursor { 1 } else { 0 },
+            output,
+            &qh,
+            frame_state.clone(),
+        );
+
+        let mut attempts = 0;
+        loop {
+            {
+                let state = lock_frame_state(&frame_state)?;
+                if state.buffer.is_some() || state.ready {
+                    if state.ready && state.buffer.is_none() {
+                        return Err(Error::FrameCapture(
+                            "Frame is ready but buffer was not received".to_string(),
+                        ));
+                    }
+                    break;
+                }
+            }
+            if attempts >= MAX_ATTEMPTS {
+                return Err(Error::FrameCapture(
+                    "Timeout waiting for frame buffer".to_string(),
+                ));
+            }
+            event_queue.blocking_dispatch(self).map_err(|e| {
+                Error::FrameCapture(format!("Failed to dispatch frame events: {}", e))
+            })?;
+            attempts += 1;
+        }
+
+        let shm = self
+            .globals
+            .shm
+            .as_ref()
+            .ok_or_else(|| Error::UnsupportedProtocol("wl_shm not available".to_string()))?;
+
+        let (width, height, stride, size, format) = {
+            let state = lock_frame_state(&frame_state)?;
+            if state.width == 0 || state.height == 0 {
+                return Err(Error::CaptureFailed);
+            }
+            let width = state.width;
+            let height = state.height;
+            let stride = width * 4;
+            let size = (stride * height) as usize;
+            let format = state.format.unwrap_or(ShmFormat::Xrgb8888);
+            (width, height, stride, size, format)
+        };
+
+        let mut tmp_file = tempfile::NamedTempFile::new().map_err(|e| {
+            Error::BufferCreation(format!("failed to create temporary file: {}", e))
+        })?;
+        tmp_file.as_file_mut().set_len(size as u64).map_err(|e| {
+            Error::BufferCreation(format!("failed to resize buffer to {} bytes: {}", size, e))
+        })?;
+        let mmap = unsafe {
+            memmap2::MmapMut::map_mut(&tmp_file)
+                .map_err(|e| Error::BufferCreation(format!("failed to memory-map buffer: {}", e)))?
+        };
+
+        let pool = shm.create_pool(
+            unsafe { BorrowedFd::borrow_raw(tmp_file.as_file().as_raw_fd()) },
+            size as i32,
+            &qh,
+            (),
+        );
+        let buffer = pool.create_buffer(
+            0,
+            width as i32,
+            height as i32,
+            stride as i32,
+            format,
+            &qh,
+            (),
+        );
+        frame.copy(&buffer);
+
+        let mut attempts = 0;
+        loop {
+            {
+                let state = lock_frame_state(&frame_state)?;
+                if state.ready {
+                    if state.buffer.is_none() {
+                        return Err(Error::FrameCapture(
+                            "Frame is ready but buffer was not received".to_string(),
+                        ));
+                    }
+                    break;
+                }
+            }
+            if attempts >= MAX_ATTEMPTS {
+                return Err(Error::FrameCapture(
+                    "Timeout waiting for frame capture completion".to_string(),
+                ));
+            }
+            event_queue.blocking_dispatch(self).map_err(|e| {
+                Error::FrameCapture(format!("Failed to dispatch frame events: {}", e))
+            })?;
+            attempts += 1;
+        }
+
+        let mut buffer_data = mmap.to_vec();
+        match format {
+            ShmFormat::Xrgb8888 => {
+                for chunk in buffer_data.chunks_exact_mut(4) {
+                    let b = chunk[0];
+                    let g = chunk[1];
+                    let r = chunk[2];
+                    chunk[0] = r;
+                    chunk[1] = g;
+                    chunk[2] = b;
+                    chunk[3] = 255;
+                }
+            }
+            ShmFormat::Argb8888 => {}
+            _ => {}
+        }
+
+        let output_id = output.id().protocol_id();
+        let mut final_data = buffer_data;
+        let mut final_width = width;
+        let mut final_height = height;
+
+        if let Some(info) = self.globals.output_info.get(&output_id) {
+            if !matches!(
+                info.transform,
+                wayland_client::protocol::wl_output::Transform::Normal
+            ) {
+                let (transformed_data, new_width, new_height) =
+                    apply_image_transform(&final_data, final_width, final_height, info.transform);
+                final_data = transformed_data;
+                final_width = new_width;
+                final_height = new_height;
+            }
+        }
+
+        let flags = {
+            let state = lock_frame_state(&frame_state)?;
+            state.flags
+        };
+        if (flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0 {
+            let (inverted_data, inv_width, inv_height) =
+                flip_vertical(&final_data, final_width, final_height);
+            final_data = inverted_data;
+            final_width = inv_width;
+            final_height = inv_height;
+        }
+
+        Ok(CaptureResult {
+            data: final_data,
+            width: final_width,
+            height: final_height,
+        })
+    }
+
     fn composite_region(
         &mut self,
         region: Box,
@@ -596,20 +837,49 @@ impl WaylandCapture {
                     continue;
                 }
 
-                let scale = info.scale as f64;
-                let physical_local_region = Box::new(
-                    (((intersection.x() - info.logical_x) as f64) * scale) as i32,
-                    (((intersection.y() - info.logical_y) as f64) * scale) as i32,
-                    ((intersection.width() as f64) * scale) as i32,
-                    ((intersection.height() as f64) * scale) as i32,
-                );
+                let scale = if info.logical_scale_known && info.logical_scale.is_finite() {
+                    info.logical_scale
+                } else {
+                    info.scale as f64
+                };
 
-                let mut capture =
-                    self.capture_region_for_output(output, physical_local_region, overlay_cursor)?;
+                // Convert logical coords to physical pixels. For fractional scale, we need to
+                // be careful with rounding so we don't miss edge pixels.
+                let local_x = (intersection.x() - info.logical_x) as f64;
+                let local_y = (intersection.y() - info.logical_y) as f64;
+                let local_w = intersection.width() as f64;
+                let local_h = intersection.height() as f64;
 
-                if scale != 1.0 {
-                    capture = self.scale_image_data(capture, 1.0 / scale)?;
-                }
+                let x0 = (local_x * scale).floor() as i32;
+                let y0 = (local_y * scale).floor() as i32;
+                let x1 = ((local_x + local_w) * scale).ceil() as i32;
+                let y1 = ((local_y + local_h) * scale).ceil() as i32;
+                let w = (x1 - x0).max(1);
+                let h = (y1 - y0).max(1);
+
+                let physical_local_region = Box::new(x0, y0, w, h);
+
+                // Important: avoid capture_output_region under fractional scaling.
+                // Capture the full output, then crop+resize in software.
+                let full = self.capture_output_for_output(output, overlay_cursor)?;
+
+                let cropped = crop_rgba(
+                    &full.data,
+                    full.width,
+                    full.height,
+                    physical_local_region.x().max(0) as u32,
+                    physical_local_region.y().max(0) as u32,
+                    physical_local_region.width().max(1) as u32,
+                    physical_local_region.height().max(1) as u32,
+                )?;
+
+                let target_width = intersection.width() as u32;
+                let target_height = intersection.height() as u32;
+                let capture = if cropped.width != target_width || cropped.height != target_height {
+                    self.resize_image_data_to(cropped, target_width, target_height)?
+                } else {
+                    cropped
+                };
 
                 let offset_x = (intersection.x() - region.x()) as usize;
                 let offset_y = (intersection.y() - region.y()) as usize;
@@ -636,6 +906,174 @@ impl WaylandCapture {
             data: dest,
             width: region.width() as u32,
             height: region.height() as u32,
+        })
+    }
+
+    fn composite_region_scaled(
+        &mut self,
+        region: Box,
+        outputs: &[(WlOutput, OutputInfo)],
+        overlay_cursor: bool,
+        scale_out: f64,
+    ) -> Result<CaptureResult> {
+        if scale_out <= 0.0 || !scale_out.is_finite() {
+            return Err(Error::InvalidRegion(
+                "Scale factor must be a positive finite number".to_string(),
+            ));
+        }
+        if region.width() <= 0 || region.height() <= 0 {
+            return Err(Error::InvalidRegion(
+                "Capture region must have positive width and height".to_string(),
+            ));
+        }
+
+        let dest_width = ((region.width() as f64) * scale_out).ceil() as usize;
+        let dest_height = ((region.height() as f64) * scale_out).ceil() as usize;
+        if dest_width == 0 || dest_height == 0 {
+            return Err(Error::InvalidRegion(
+                "Scaled dimensions must be positive".to_string(),
+            ));
+        }
+
+        let mut dest = vec![0u8; dest_width * dest_height * 4];
+        let mut any_capture = false;
+
+        for (output, info) in outputs {
+            let output_box = Box::new(
+                info.logical_x,
+                info.logical_y,
+                info.logical_width,
+                info.logical_height,
+            );
+
+            if let Some(intersection) = output_box.intersection(&region) {
+                if intersection.width() <= 0 || intersection.height() <= 0 {
+                    continue;
+                }
+
+                let output_scale = if info.logical_scale_known && info.logical_scale.is_finite() {
+                    info.logical_scale
+                } else {
+                    info.scale as f64
+                };
+
+                // Convert logical coords to physical pixels.
+                let local_x = (intersection.x() - info.logical_x) as f64;
+                let local_y = (intersection.y() - info.logical_y) as f64;
+                let local_w = intersection.width() as f64;
+                let local_h = intersection.height() as f64;
+
+                let x0 = (local_x * output_scale).floor() as i32;
+                let y0 = (local_y * output_scale).floor() as i32;
+                let x1 = ((local_x + local_w) * output_scale).ceil() as i32;
+                let y1 = ((local_y + local_h) * output_scale).ceil() as i32;
+                let w = (x1 - x0).max(1);
+                let h = (y1 - y0).max(1);
+                let physical_local_region = Box::new(x0, y0, w, h);
+
+                // Avoid capture_output_region under fractional scaling.
+                // Capture the full output, then crop in software.
+                let full = self.capture_output_for_output(output, overlay_cursor)?;
+
+                let cropped = crop_rgba(
+                    &full.data,
+                    full.width,
+                    full.height,
+                    physical_local_region.x().max(0) as u32,
+                    physical_local_region.y().max(0) as u32,
+                    physical_local_region.width().max(1) as u32,
+                    physical_local_region.height().max(1) as u32,
+                )?;
+
+                // Destination placement (scaled logical pixels). Use floor/ceil to match the
+                // physical rounding above and avoid gaps.
+                let dx0 = (((intersection.x() - region.x()) as f64) * scale_out).floor() as i32;
+                let dy0 = (((intersection.y() - region.y()) as f64) * scale_out).floor() as i32;
+                let dx1 = ((((intersection.x() - region.x() + intersection.width()) as f64)
+                    * scale_out)
+                    .ceil()) as i32;
+                let dy1 = ((((intersection.y() - region.y() + intersection.height()) as f64)
+                    * scale_out)
+                    .ceil()) as i32;
+
+                let target_width = (dx1 - dx0).max(1) as u32;
+                let target_height = (dy1 - dy0).max(1) as u32;
+
+                let capture = if cropped.width != target_width || cropped.height != target_height {
+                    self.resize_image_data_to(cropped, target_width, target_height)?
+                } else {
+                    cropped
+                };
+
+                let offset_x = dx0.max(0) as usize;
+                let offset_y = dy0.max(0) as usize;
+
+                blit_capture(
+                    &mut dest,
+                    dest_width,
+                    dest_height,
+                    &capture,
+                    offset_x,
+                    offset_y,
+                );
+                any_capture = true;
+            }
+        }
+
+        if !any_capture {
+            return Err(Error::InvalidRegion(
+                "Capture region does not intersect with any output".to_string(),
+            ));
+        }
+
+        Ok(CaptureResult {
+            data: dest,
+            width: dest_width as u32,
+            height: dest_height as u32,
+        })
+    }
+
+    fn resize_image_data_to(
+        &self,
+        capture_result: CaptureResult,
+        width: u32,
+        height: u32,
+    ) -> Result<CaptureResult> {
+        if capture_result.width == width && capture_result.height == height {
+            return Ok(capture_result);
+        }
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidRegion(
+                "Scaled dimensions must be positive".to_string(),
+            ));
+        }
+
+        use image::{imageops, ImageBuffer, Rgba};
+
+        let img = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
+            capture_result.width,
+            capture_result.height,
+            capture_result.data,
+        )
+        .ok_or_else(|| {
+            Error::ScalingFailed(format!(
+                "failed to create image buffer for scaling {}x{} -> {}x{}",
+                capture_result.width, capture_result.height, width, height
+            ))
+        })?;
+
+        let filter = if width >= capture_result.width && height >= capture_result.height {
+            imageops::FilterType::CatmullRom
+        } else {
+            imageops::FilterType::Lanczos3
+        };
+
+        let scaled_img = imageops::resize(&img, width, height, filter);
+
+        Ok(CaptureResult {
+            data: scaled_img.into_raw(),
+            width,
+            height,
         })
     }
 
@@ -668,6 +1106,50 @@ impl WaylandCapture {
             return Err(Error::NoOutputs);
         }
         Ok(outputs)
+    }
+
+    pub fn greatest_logical_scale_for_region(&mut self, region: Option<Box>) -> Result<f64> {
+        self.refresh_outputs()?;
+        let snapshot = self.collect_outputs_snapshot();
+        if snapshot.is_empty() {
+            return Err(Error::NoOutputs);
+        }
+
+        let mut max_scale = 1.0_f64;
+        let mut any = false;
+
+        for (_, info) in &snapshot {
+            let output_box = Box::new(
+                info.logical_x,
+                info.logical_y,
+                info.logical_width,
+                info.logical_height,
+            );
+            if let Some(ref region) = region {
+                if output_box.intersection(region).is_none() {
+                    continue;
+                }
+            }
+
+            let scale = if info.logical_scale_known && info.logical_scale.is_finite() {
+                info.logical_scale
+            } else {
+                info.scale as f64
+            };
+
+            if scale > max_scale {
+                max_scale = scale;
+            }
+            any = true;
+        }
+
+        if !any {
+            return Err(Error::InvalidRegion(
+                "Capture region does not intersect with any output".to_string(),
+            ));
+        }
+
+        Ok(max_scale)
     }
 
     pub fn capture_all(&mut self) -> Result<CaptureResult> {
@@ -714,13 +1196,12 @@ impl WaylandCapture {
             max_y = max_y.max(info.logical_y + info.logical_height);
         }
 
-        let original_result = self.composite_region(
-            Box::new(min_x, min_y, max_x - min_x, max_y - min_y),
-            &snapshot,
-            false,
-        )?;
-
-        self.scale_image_data(original_result, scale)
+        let region = Box::new(min_x, min_y, max_x - min_x, max_y - min_y);
+        if scale == 1.0 {
+            self.composite_region(region, &snapshot, false)
+        } else {
+            self.composite_region_scaled(region, &snapshot, false, scale)
+        }
     }
 
     pub fn capture_output(&mut self, output_name: &str) -> Result<CaptureResult> {
@@ -742,14 +1223,23 @@ impl WaylandCapture {
     ) -> Result<CaptureResult> {
         self.refresh_outputs()?;
         let snapshot = self.collect_outputs_snapshot();
-        let (output_handle, info) = snapshot
-            .into_iter()
+        let (_, info) = snapshot
+            .iter()
             .find(|(_, info)| info.name == output_name)
             .ok_or_else(|| Error::OutputNotFound(output_name.to_string()))?;
 
-        let local_region = Box::new(0, 0, info.width, info.height);
-        let result = self.capture_region_for_output(&output_handle, local_region, false)?;
-        self.scale_image_data(result, scale)
+        let region = Box::new(
+            info.logical_x,
+            info.logical_y,
+            info.logical_width,
+            info.logical_height,
+        );
+
+        if scale == 1.0 {
+            self.composite_region(region, &snapshot, false)
+        } else {
+            self.composite_region_scaled(region, &snapshot, false, scale)
+        }
     }
 
     pub fn capture_region(&mut self, region: Box) -> Result<CaptureResult> {
@@ -759,22 +1249,18 @@ impl WaylandCapture {
     }
 
     pub fn capture_region_with_scale(&mut self, region: Box, scale: f64) -> Result<CaptureResult> {
-        let result = self.capture_region(region)?;
-        self.scale_image_data(result, scale)
+        self.refresh_outputs()?;
+        let snapshot = self.collect_outputs_snapshot();
+        if scale == 1.0 {
+            self.composite_region(region, &snapshot, false)
+        } else {
+            self.composite_region_scaled(region, &snapshot, false, scale)
+        }
     }
 
     fn scale_image_data(&self, capture_result: CaptureResult, scale: f64) -> Result<CaptureResult> {
         if scale == 1.0 {
             return Ok(capture_result);
-        }
-
-        let scale_int = scale as u32;
-        if scale > 1.0
-            && (scale - (scale_int as f64)).abs() < 0.01
-            && scale_int >= 2
-            && scale_int <= 4
-        {
-            return self.scale_image_integer_fast(capture_result, scale_int);
         }
 
         let old_width = capture_result.width;
@@ -799,11 +1285,9 @@ impl WaylandCapture {
                     ))
                 })?;
 
-        let filter = if scale > 1.0 {
-            imageops::FilterType::Nearest
+        let filter = if scale >= 1.0 {
+            imageops::FilterType::CatmullRom
         } else if scale >= 0.75 {
-            imageops::FilterType::Triangle
-        } else if scale >= 0.5 {
             imageops::FilterType::CatmullRom
         } else {
             imageops::FilterType::Lanczos3
@@ -816,59 +1300,6 @@ impl WaylandCapture {
             width: new_width,
             height: new_height,
         })
-    }
-
-    /// Fast scaling for integer multipliers (2x, 3x, 4x)
-    ///
-    /// Uses nearest neighbor without floating point operations for maximum performance.
-    /// Each pixel from the source image is duplicated into a factor×factor block of pixels.
-    ///
-    /// # Performance
-    ///
-    /// This implementation is 20-30x faster than `image::imageops::resize` because it:
-    /// - Avoids roundf calls (~258ms for 30M pixels)
-    /// - Avoids float→u8 conversion (~241ms)
-    /// - Avoids exp calls in interpolation (~223ms)
-    /// - Uses simple memory block copying
-    fn scale_image_integer_fast(
-        &self,
-        capture: CaptureResult,
-        factor: u32,
-    ) -> Result<CaptureResult> {
-        let old_width = capture.width as usize;
-        let old_height = capture.height as usize;
-        let new_width = old_width * (factor as usize);
-        let new_height = old_height * (factor as usize);
-
-        let mut new_data = vec![0u8; new_width * new_height * 4];
-
-        for old_y in 0..old_height {
-            for old_x in 0..old_width {
-                let old_idx = (old_y * old_width + old_x) * 4;
-                let pixel = [
-                    capture.data[old_idx],
-                    capture.data[old_idx + 1],
-                    capture.data[old_idx + 2],
-                    capture.data[old_idx + 3],
-                ];
-
-                for dy in 0..factor as usize {
-                    for dx in 0..factor as usize {
-                        let new_x = old_x * (factor as usize) + dx;
-                        let new_y = old_y * (factor as usize) + dy;
-                        let new_idx = (new_y * new_width + new_x) * 4;
-
-                        new_data[new_idx..new_idx + 4].copy_from_slice(&pixel);
-                    }
-                }
-            }
-        }
-
-        Ok(CaptureResult::new(
-            new_data,
-            new_width as u32,
-            new_height as u32,
-        ))
     }
 
     pub fn capture_outputs(
@@ -957,7 +1388,7 @@ impl WaylandCapture {
                     state
                         .lock()
                         .ok()
-                        .is_some_and(|s| (s.buffer.is_some() || s.ready))
+                        .is_some_and(|s| s.buffer.is_some() || s.ready)
                 })
                 .count();
             if completed_frames >= total_frames {
@@ -1075,10 +1506,10 @@ impl WaylandCapture {
                 (state.width, state.height)
             };
             let mut buffer_data = mmap.to_vec();
-            if let Some(format) = ({
+            if let Some(format) = {
                 let state = lock_frame_state(frame_state)?;
                 state.format
-            }) {
+            } {
                 match format {
                     ShmFormat::Xrgb8888 => {
                         for chunk in buffer_data.chunks_exact_mut(4) {
@@ -1157,15 +1588,12 @@ impl Dispatch<WlRegistry, ()> for WaylandCapture {
                     state.globals.xdg_output_manager =
                         Some(registry.bind::<ZxdgOutputManagerV1, _, _>(name, version, qh, ()));
 
-                    for output in &state.globals.outputs {
-                        let xdg_output = state
-                            .globals
-                            .xdg_output_manager
-                            .as_ref()
-                            .unwrap()
-                            .get_xdg_output(output, qh, ());
-                        let output_id = output.id().protocol_id();
-                        state.globals.output_xdg_map.insert(output_id, xdg_output);
+                    if let Some(ref xdg_output_manager) = state.globals.xdg_output_manager {
+                        for output in &state.globals.outputs {
+                            let xdg_output = xdg_output_manager.get_xdg_output(output, qh, ());
+                            let output_id = output.id().protocol_id();
+                            state.globals.output_xdg_map.insert(output_id, xdg_output);
+                        }
                     }
                 }
                 "wl_output" => {
@@ -1187,6 +1615,7 @@ impl Dispatch<WlRegistry, ()> for WaylandCapture {
                             logical_width: 0,
                             logical_height: 0,
                             logical_scale_known: false,
+                            logical_scale: 1.0,
                             description: None,
                         },
                     );
@@ -1238,6 +1667,8 @@ impl Dispatch<WlOutput, ()> for WaylandCapture {
                         info.logical_x = x;
                         info.logical_y = y;
                     }
+
+                    update_logical_scale(info);
                 }
             }
             Event::Mode {
@@ -1260,11 +1691,14 @@ impl Dispatch<WlOutput, ()> for WaylandCapture {
                         info.logical_width = width;
                         info.logical_height = height;
                     }
+
+                    update_logical_scale(info);
                 }
             }
             Event::Scale { factor } => {
                 if let Some(info) = state.globals.output_info.get_mut(&output_id) {
                     info.scale = factor;
+                    update_logical_scale(info);
                 }
             }
             Event::Name { name } => {
@@ -1335,8 +1769,16 @@ impl Dispatch<ZwlrScreencopyFrameV1, Arc<Mutex<FrameState>>> for WaylandCapture 
                 height,
                 stride,
             } => {
-                let mut state = lock_frame_state(frame_state)
-                    .expect("Frame state mutex poisoned in Buffer event");
+                let mut state = match lock_frame_state(frame_state) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        log::error!(
+                            "Dropping screencopy Buffer event due to mutex error: {}",
+                            err
+                        );
+                        return;
+                    }
+                };
                 state.width = width;
                 state.height = height;
                 if let wayland_client::WEnum::Value(val) = format {
@@ -1345,8 +1787,16 @@ impl Dispatch<ZwlrScreencopyFrameV1, Arc<Mutex<FrameState>>> for WaylandCapture 
                 state.buffer = Some(vec![0u8; (stride * height) as usize]);
             }
             Event::Flags { flags } => {
-                let mut state = lock_frame_state(frame_state)
-                    .expect("Frame state mutex poisoned in Flags event");
+                let mut state = match lock_frame_state(frame_state) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        log::error!(
+                            "Dropping screencopy Flags event due to mutex error: {}",
+                            err
+                        );
+                        return;
+                    }
+                };
                 if let wayland_client::WEnum::Value(val) = flags {
                     state.flags = val.bits();
                     log::debug!("Received flags: {:?} (bits: {})", flags, val.bits());
@@ -1357,14 +1807,30 @@ impl Dispatch<ZwlrScreencopyFrameV1, Arc<Mutex<FrameState>>> for WaylandCapture 
                 tv_sec_lo: _,
                 tv_nsec: _,
             } => {
-                let mut state = lock_frame_state(frame_state)
-                    .expect("Frame state mutex poisoned in Ready event");
+                let mut state = match lock_frame_state(frame_state) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        log::error!(
+                            "Dropping screencopy Ready event due to mutex error: {}",
+                            err
+                        );
+                        return;
+                    }
+                };
                 state.ready = true;
                 frame.destroy();
             }
             Event::Failed => {
-                let mut state = lock_frame_state(frame_state)
-                    .expect("Frame state mutex poisoned in Failed event");
+                let mut state = match lock_frame_state(frame_state) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        log::error!(
+                            "Dropping screencopy Failed event due to mutex error: {}",
+                            err
+                        );
+                        return;
+                    }
+                };
                 state.ready = true;
             }
             Event::LinuxDmabuf {
@@ -1372,8 +1838,8 @@ impl Dispatch<ZwlrScreencopyFrameV1, Arc<Mutex<FrameState>>> for WaylandCapture 
                 width,
                 height,
             } => {
-                // TODO:Обработка LinuxDmabuf - альтернативный способ передачи данных
-                // Пока не поддерживаем, но логируем для отладки
+                // LinuxDmabuf is an alternative buffer transfer mechanism. We currently do not
+                // support this path, but we log it to ease debugging on compositors that offer it.
                 log::debug!(
                     "Received LinuxDmabuf: format={}, width={}, height={}",
                     format,
@@ -1419,11 +1885,13 @@ impl Dispatch<ZxdgOutputV1, ()> for WaylandCapture {
                         info.logical_x = x;
                         info.logical_y = y;
                         info.logical_scale_known = true;
+                        update_logical_scale(info);
                     }
                     Event::LogicalSize { width, height } => {
                         info.logical_width = width;
                         info.logical_height = height;
                         info.logical_scale_known = true;
+                        update_logical_scale(info);
                     }
                     Event::Name { name } => {
                         if info.name.starts_with("output-") || info.name.is_empty() {
@@ -1435,6 +1903,7 @@ impl Dispatch<ZxdgOutputV1, ()> for WaylandCapture {
                     }
                     Event::Done => {
                         info.logical_scale_known = true;
+                        update_logical_scale(info);
                     }
                     _ => {}
                 }

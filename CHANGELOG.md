@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Wayland region capture under fractional scaling**: Fixed incorrect output dimensions and large black areas when capturing a region. The root cause was a logical/physical coordinate mismatch when converting region coordinates under fractional output scales; the implementation now infers a fractional logical scale (when available) and captures/crops/resizes in software to avoid rounding artifacts.
+
 ## [0.1.3] - 2025-10-11
 
 ### Changed
