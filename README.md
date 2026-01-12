@@ -252,6 +252,8 @@ fn main() -> grim_rs::Result<()> {
 
 The `grim-rs` binary supports the same functionality as the library API. By default, saves to `~/Pictures` (XDG Pictures directory) with timestamped filenames.
 
+If `-s` is not provided, the binary chooses a default scale like `grim`: it uses the greatest (possibly fractional) logical output scale for the target being captured (region/output/all outputs).
+
 **Available Options:**
 ```bash
 -h              Show help message and quit

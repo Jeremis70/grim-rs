@@ -130,6 +130,21 @@ fn main() -> grim_rs::Result<()> {
 
     let mut grim = Grim::new()?;
 
+    let default_scale = if let Some(scale) = opts.scale {
+        scale
+    } else if let Some(region) = opts.geometry {
+        grim.greatest_scale_for_region(Some(region))?
+    } else if let Some(ref output_name) = opts.output_name {
+        let outputs = grim.get_outputs()?;
+        let output = outputs
+            .iter()
+            .find(|o| o.name() == output_name)
+            .ok_or_else(|| grim_rs::Error::OutputNotFound(output_name.clone()))?;
+        grim.greatest_scale_for_region(Some(*output.geometry()))?
+    } else {
+        grim.greatest_scale_for_region(None)?
+    };
+
     let result = if let Some(ref output_name) = opts.output_name {
         if opts.with_cursor {
             let mut params =
@@ -140,20 +155,19 @@ fn main() -> grim_rs::Result<()> {
             if let Some(scale) = opts.scale {
                 params = params.scale(scale);
             }
-            let multi_result =
-                grim.capture_outputs_with_scale(vec![params], opts.scale.unwrap_or(1.0))?;
+            let multi_result = grim.capture_outputs_with_scale(vec![params], default_scale)?;
             if let Some(capture_result) = multi_result.get(output_name) {
                 capture_result.clone()
             } else {
                 return Err(grim_rs::Error::OutputNotFound(output_name.clone()));
             }
         } else {
-            grim.capture_output_with_scale(output_name, opts.scale.unwrap_or(1.0))?
+            grim.capture_output_with_scale(output_name, default_scale)?
         }
     } else if let Some(ref geometry) = opts.geometry {
-        grim.capture_region_with_scale(*geometry, opts.scale.unwrap_or(1.0))?
+        grim.capture_region_with_scale(*geometry, default_scale)?
     } else {
-        grim.capture_all_with_scale(opts.scale.unwrap_or(1.0))?
+        grim.capture_all_with_scale(default_scale)?
     };
 
     save_or_write_result(&grim, &result, &output_file, &opts)?;
