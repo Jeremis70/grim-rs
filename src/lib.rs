@@ -295,7 +295,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -324,7 +324,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::{Box, Grim};
     ///
     /// let mut grim = Grim::new()?;
@@ -352,7 +352,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -382,7 +382,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -411,7 +411,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -445,7 +445,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -483,7 +483,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::{Grim, Box};
     ///
     /// let mut grim = Grim::new()?;
@@ -515,7 +515,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::{Grim, Box};
     ///
     /// let mut grim = Grim::new()?;
@@ -550,7 +550,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::{Grim, CaptureParameters, Box};
     ///
     /// let mut grim = Grim::new()?;
@@ -933,9 +933,9 @@ impl Grim {
     /// ```rust
     /// use grim_rs::Grim;
     ///
-    /// let mut grim = Grim::new()?;
-    /// let result = grim.capture_all()?;
-    /// let jpeg_bytes = grim.to_jpeg(result.data(), result.width(), result.height())?;
+    /// let grim = Grim::new()?;
+    /// let rgba = vec![255u8; 4 * 4 * 4];
+    /// let jpeg_bytes = grim.to_jpeg(&rgba, 4, 4)?;
     /// println!("JPEG data size: {} bytes", jpeg_bytes.len());
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
@@ -972,9 +972,9 @@ impl Grim {
     /// ```rust
     /// use grim_rs::Grim;
     ///
-    /// let mut grim = Grim::new()?;
-    /// let result = grim.capture_all()?;
-    /// let jpeg_bytes = grim.to_jpeg_with_quality(result.data(), result.width(), result.height(), 90)?;
+    /// let grim = Grim::new()?;
+    /// let rgba = vec![255u8; 4 * 4 * 4];
+    /// let jpeg_bytes = grim.to_jpeg_with_quality(&rgba, 4, 4, 90)?;
     /// println!("JPEG data size: {} bytes", jpeg_bytes.len());
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
@@ -1078,9 +1078,9 @@ impl Grim {
     /// ```rust
     /// use grim_rs::Grim;
     ///
-    /// let mut grim = Grim::new()?;
-    /// let result = grim.capture_all()?;
-    /// let png_bytes = grim.to_png(result.data(), result.width(), result.height())?;
+    /// let grim = Grim::new()?;
+    /// let rgba = vec![255u8; 4 * 4 * 4];
+    /// let png_bytes = grim.to_png(&rgba, 4, 4)?;
     /// println!("PNG data size: {} bytes", png_bytes.len());
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
@@ -1113,9 +1113,9 @@ impl Grim {
     /// ```rust
     /// use grim_rs::Grim;
     ///
-    /// let mut grim = Grim::new()?;
-    /// let result = grim.capture_all()?;
-    /// let png_bytes = grim.to_png_with_compression(result.data(), result.width(), result.height(), 9)?;
+    /// let grim = Grim::new()?;
+    /// let rgba = vec![255u8; 4 * 4 * 4];
+    /// let png_bytes = grim.to_png_with_compression(&rgba, 4, 4, 9)?;
     /// println!("PNG data size: {} bytes", png_bytes.len());
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
@@ -1241,9 +1241,9 @@ impl Grim {
     /// ```rust
     /// use grim_rs::Grim;
     ///
-    /// let mut grim = Grim::new()?;
-    /// let result = grim.capture_all()?;
-    /// let ppm_bytes = grim.to_ppm(result.data(), result.width(), result.height())?;
+    /// let grim = Grim::new()?;
+    /// let rgba = vec![255u8; 2 * 2 * 4];
+    /// let ppm_bytes = grim.to_ppm(&rgba, 2, 2)?;
     /// println!("PPM data size: {} bytes", ppm_bytes.len());
     /// # Ok::<(), grim_rs::Error>(())
     /// ```
@@ -1317,7 +1317,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -1354,7 +1354,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -1397,7 +1397,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -1430,7 +1430,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
@@ -1473,7 +1473,7 @@ impl Grim {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use grim_rs::Grim;
     ///
     /// let mut grim = Grim::new()?;
