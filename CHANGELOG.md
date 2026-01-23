@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.4]
 
 ### Fixed
-- **Wayland region capture under fractional scaling**: Fixed incorrect output dimensions and large black areas when capturing a region. The root cause was a logical/physical coordinate mismatch when converting region coordinates under fractional output scales; the implementation now uses a fractional logical scale (when available), converts coordinates using floor/ceil rounding, clamps to output boundaries, and resizes to the expected logical region size when needed.
+- **Wayland region capture under fractional scaling**: Corrected logical/physical mapping by using a fractional logical scale (when available) and floor/ceil rounding to avoid incorrect region sizes. Fixes [#9](https://github.com/shikoucore/grim-rs/issues/9), [@Jeremis70](https://github.com/Jeremis70).
 
 ## [0.1.3] - 2025-10-11
 

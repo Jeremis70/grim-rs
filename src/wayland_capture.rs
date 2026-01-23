@@ -273,45 +273,6 @@ fn blit_capture(
     }
 }
 
-fn crop_rgba(
-    data: &[u8],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-) -> Result<CaptureResult> {
-    if w == 0 || h == 0 {
-        return Err(Error::InvalidRegion(
-            "Crop dimensions must be positive".to_string(),
-        ));
-    }
-    if x >= width || y >= height {
-        return Err(Error::InvalidRegion(
-            "Crop origin is outside image".to_string(),
-        ));
-    }
-
-    let w = w.min(width - x);
-    let h = h.min(height - y);
-
-    let mut out = vec![0u8; (w * h * 4) as usize];
-    let dst_stride = (w * 4) as usize;
-
-    for row in 0..h {
-        let src_off = ((y + row) * width + x) as usize * 4;
-        let dst_off = (row as usize) * dst_stride;
-        out[dst_off..dst_off + dst_stride].copy_from_slice(&data[src_off..src_off + dst_stride]);
-    }
-
-    Ok(CaptureResult {
-        data: out,
-        width: w,
-        height: h,
-    })
-}
-
 /// Check if outputs have overlapping regions.
 #[derive(Clone)]
 struct OutputInfo {
@@ -627,186 +588,6 @@ impl WaylandCapture {
         })
     }
 
-    fn capture_output_for_output(
-        &mut self,
-        output: &WlOutput,
-        overlay_cursor: bool,
-    ) -> Result<CaptureResult> {
-        let screencopy_manager =
-            self.globals
-                .screencopy_manager
-                .as_ref()
-                .ok_or(Error::UnsupportedProtocol(
-                    "zwlr_screencopy_manager_v1 not available".to_string(),
-                ))?;
-
-        let mut event_queue = self._connection.new_event_queue();
-        let qh = event_queue.handle();
-        let frame_state = Arc::new(Mutex::new(FrameState {
-            buffer: None,
-            width: 0,
-            height: 0,
-            format: None,
-            ready: false,
-            flags: 0,
-        }));
-
-        let frame = screencopy_manager.capture_output(
-            if overlay_cursor { 1 } else { 0 },
-            output,
-            &qh,
-            frame_state.clone(),
-        );
-
-        let mut attempts = 0;
-        loop {
-            {
-                let state = lock_frame_state(&frame_state)?;
-                if state.buffer.is_some() || state.ready {
-                    if state.ready && state.buffer.is_none() {
-                        return Err(Error::FrameCapture(
-                            "Frame is ready but buffer was not received".to_string(),
-                        ));
-                    }
-                    break;
-                }
-            }
-            if attempts >= MAX_ATTEMPTS {
-                return Err(Error::FrameCapture(
-                    "Timeout waiting for frame buffer".to_string(),
-                ));
-            }
-            event_queue.blocking_dispatch(self).map_err(|e| {
-                Error::FrameCapture(format!("Failed to dispatch frame events: {}", e))
-            })?;
-            attempts += 1;
-        }
-
-        let shm = self
-            .globals
-            .shm
-            .as_ref()
-            .ok_or_else(|| Error::UnsupportedProtocol("wl_shm not available".to_string()))?;
-
-        let (width, height, stride, size, format) = {
-            let state = lock_frame_state(&frame_state)?;
-            if state.width == 0 || state.height == 0 {
-                return Err(Error::CaptureFailed);
-            }
-            let width = state.width;
-            let height = state.height;
-            let stride = width * 4;
-            let size = (stride * height) as usize;
-            let format = state.format.unwrap_or(ShmFormat::Xrgb8888);
-            (width, height, stride, size, format)
-        };
-
-        let mut tmp_file = tempfile::NamedTempFile::new().map_err(|e| {
-            Error::BufferCreation(format!("failed to create temporary file: {}", e))
-        })?;
-        tmp_file.as_file_mut().set_len(size as u64).map_err(|e| {
-            Error::BufferCreation(format!("failed to resize buffer to {} bytes: {}", size, e))
-        })?;
-        let mmap = unsafe {
-            memmap2::MmapMut::map_mut(&tmp_file)
-                .map_err(|e| Error::BufferCreation(format!("failed to memory-map buffer: {}", e)))?
-        };
-
-        let pool = shm.create_pool(
-            unsafe { BorrowedFd::borrow_raw(tmp_file.as_file().as_raw_fd()) },
-            size as i32,
-            &qh,
-            (),
-        );
-        let buffer = pool.create_buffer(
-            0,
-            width as i32,
-            height as i32,
-            stride as i32,
-            format,
-            &qh,
-            (),
-        );
-        frame.copy(&buffer);
-
-        let mut attempts = 0;
-        loop {
-            {
-                let state = lock_frame_state(&frame_state)?;
-                if state.ready {
-                    if state.buffer.is_none() {
-                        return Err(Error::FrameCapture(
-                            "Frame is ready but buffer was not received".to_string(),
-                        ));
-                    }
-                    break;
-                }
-            }
-            if attempts >= MAX_ATTEMPTS {
-                return Err(Error::FrameCapture(
-                    "Timeout waiting for frame capture completion".to_string(),
-                ));
-            }
-            event_queue.blocking_dispatch(self).map_err(|e| {
-                Error::FrameCapture(format!("Failed to dispatch frame events: {}", e))
-            })?;
-            attempts += 1;
-        }
-
-        let mut buffer_data = mmap.to_vec();
-        match format {
-            ShmFormat::Xrgb8888 => {
-                for chunk in buffer_data.chunks_exact_mut(4) {
-                    let b = chunk[0];
-                    let g = chunk[1];
-                    let r = chunk[2];
-                    chunk[0] = r;
-                    chunk[1] = g;
-                    chunk[2] = b;
-                    chunk[3] = 255;
-                }
-            }
-            ShmFormat::Argb8888 => {}
-            _ => {}
-        }
-
-        let output_id = output.id().protocol_id();
-        let mut final_data = buffer_data;
-        let mut final_width = width;
-        let mut final_height = height;
-
-        if let Some(info) = self.globals.output_info.get(&output_id) {
-            if !matches!(
-                info.transform,
-                wayland_client::protocol::wl_output::Transform::Normal
-            ) {
-                let (transformed_data, new_width, new_height) =
-                    apply_image_transform(&final_data, final_width, final_height, info.transform);
-                final_data = transformed_data;
-                final_width = new_width;
-                final_height = new_height;
-            }
-        }
-
-        let flags = {
-            let state = lock_frame_state(&frame_state)?;
-            state.flags
-        };
-        if (flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0 {
-            let (inverted_data, inv_width, inv_height) =
-                flip_vertical(&final_data, final_width, final_height);
-            final_data = inverted_data;
-            final_width = inv_width;
-            final_height = inv_height;
-        }
-
-        Ok(CaptureResult {
-            data: final_data,
-            width: final_width,
-            height: final_height,
-        })
-    }
-
     fn composite_region(
         &mut self,
         region: Box,
@@ -854,58 +635,22 @@ impl WaylandCapture {
                 let x1 = ((local_x + local_w) * scale).ceil() as i32;
                 let y1 = ((local_y + local_h) * scale).ceil() as i32;
 
-                // If the compositor reports a fractional logical scale (i.e. it doesn't match the
-                // integer wl_output.scale), wlr-screencopy's region path can be unreliable.
-                // Use full-output capture + software crop as a rare fallback.
-                let use_full_output_fallback = info.logical_scale_known
-                    && info.logical_scale.is_finite()
-                    && (info.logical_scale - info.scale as f64).abs() > 0.01;
+                // Clamp to output boundaries in physical pixels.
+                let x0 = x0.clamp(0, info.width);
+                let y0 = y0.clamp(0, info.height);
+                let x1 = x1.clamp(0, info.width);
+                let y1 = y1.clamp(0, info.height);
 
-                let mut capture = if use_full_output_fallback {
-                    let full = self.capture_output_for_output(output, overlay_cursor)?;
-                    let full_w = full.width as i32;
-                    let full_h = full.height as i32;
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
 
-                    let x0 = x0.clamp(0, full_w);
-                    let y0 = y0.clamp(0, full_h);
-                    let x1 = x1.clamp(0, full_w);
-                    let y1 = y1.clamp(0, full_h);
+                let physical_local_region = Box::new(x0, y0, x1 - x0, y1 - y0);
+                let mut capture =
+                    self.capture_region_for_output(output, physical_local_region, overlay_cursor)?;
 
-                    if x1 <= x0 || y1 <= y0 {
-                        continue;
-                    }
-
-                    let cropped = crop_rgba(
-                        &full.data,
-                        full.width,
-                        full.height,
-                        x0 as u32,
-                        y0 as u32,
-                        (x1 - x0) as u32,
-                        (y1 - y0) as u32,
-                    )?;
-
-                    cropped
-                } else {
-                    // Clamp to output boundaries in physical pixels.
-                    let x0 = x0.clamp(0, info.width);
-                    let y0 = y0.clamp(0, info.height);
-                    let x1 = x1.clamp(0, info.width);
-                    let y1 = y1.clamp(0, info.height);
-
-                    if x1 <= x0 || y1 <= y0 {
-                        continue;
-                    }
-
-                    let physical_local_region = Box::new(x0, y0, x1 - x0, y1 - y0);
-                    self.capture_region_for_output(output, physical_local_region, overlay_cursor)?
-                };
-
-                // Resize to expected logical dimensions (avoids rounding artifacts/gaps).
-                let target_width = intersection.width() as u32;
-                let target_height = intersection.height() as u32;
-                if capture.width != target_width || capture.height != target_height {
-                    capture = self.resize_image_data_to(capture, target_width, target_height)?;
+                if scale != 1.0 {
+                    capture = self.scale_image_data(capture, 1.0 / scale)?;
                 }
 
                 let offset_x = (intersection.x() - region.x()) as usize;
@@ -933,50 +678,6 @@ impl WaylandCapture {
             data: dest,
             width: region.width() as u32,
             height: region.height() as u32,
-        })
-    }
-
-    fn resize_image_data_to(
-        &self,
-        capture_result: CaptureResult,
-        width: u32,
-        height: u32,
-    ) -> Result<CaptureResult> {
-        if capture_result.width == width && capture_result.height == height {
-            return Ok(capture_result);
-        }
-        if width == 0 || height == 0 {
-            return Err(Error::InvalidRegion(
-                "Scaled dimensions must be positive".to_string(),
-            ));
-        }
-
-        use image::{imageops, ImageBuffer, Rgba};
-
-        let img = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
-            capture_result.width,
-            capture_result.height,
-            capture_result.data,
-        )
-        .ok_or_else(|| {
-            Error::ScalingFailed(format!(
-                "failed to create image buffer for scaling {}x{} -> {}x{}",
-                capture_result.width, capture_result.height, width, height
-            ))
-        })?;
-
-        let filter = if width >= capture_result.width && height >= capture_result.height {
-            imageops::FilterType::CatmullRom
-        } else {
-            imageops::FilterType::Lanczos3
-        };
-
-        let scaled_img = imageops::resize(&img, width, height, filter);
-
-        Ok(CaptureResult {
-            data: scaled_img.into_raw(),
-            width,
-            height,
         })
     }
 
@@ -1077,6 +778,15 @@ impl WaylandCapture {
             return Ok(capture_result);
         }
 
+        let scale_int = scale as u32;
+        if scale > 1.0
+            && (scale - (scale_int as f64)).abs() < 0.01
+            && scale_int >= 2
+            && scale_int <= 4
+        {
+            return self.scale_image_integer_fast(capture_result, scale_int);
+        }
+
         let old_width = capture_result.width;
         let old_height = capture_result.height;
         let new_width = ((old_width as f64) * scale) as u32;
@@ -1088,7 +798,87 @@ impl WaylandCapture {
             ));
         }
 
-        self.resize_image_data_to(capture_result, new_width, new_height)
+        use image::{imageops, ImageBuffer, Rgba};
+
+        let img =
+            ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(old_width, old_height, capture_result.data)
+                .ok_or_else(|| {
+                    Error::ScalingFailed(format!(
+                        "failed to create image buffer for scaling {}x{} -> {}x{}",
+                        old_width, old_height, new_width, new_height
+                    ))
+                })?;
+
+        let filter = if scale > 1.0 {
+            imageops::FilterType::Nearest
+        } else if scale >= 0.75 {
+            imageops::FilterType::Triangle
+        } else if scale >= 0.5 {
+            imageops::FilterType::CatmullRom
+        } else {
+            imageops::FilterType::Lanczos3
+        };
+
+        let scaled_img = imageops::resize(&img, new_width, new_height, filter);
+
+        Ok(CaptureResult {
+            data: scaled_img.into_raw(),
+            width: new_width,
+            height: new_height,
+        })
+    }
+
+    /// Fast scaling for integer multipliers (2x, 3x, 4x)
+    ///
+    /// Uses nearest neighbor without floating point operations for maximum performance.
+    /// Each pixel from the source image is duplicated into a factor×factor block of pixels.
+    ///
+    /// # Performance
+    ///
+    /// This implementation is 20-30x faster than `image::imageops::resize` because it:
+    /// - Avoids roundf calls (~258ms for 30M pixels)
+    /// - Avoids float→u8 conversion (~241ms)
+    /// - Avoids exp calls in interpolation (~223ms)
+    /// - Uses simple memory block copying
+    fn scale_image_integer_fast(
+        &self,
+        capture: CaptureResult,
+        factor: u32,
+    ) -> Result<CaptureResult> {
+        let old_width = capture.width as usize;
+        let old_height = capture.height as usize;
+        let new_width = old_width * (factor as usize);
+        let new_height = old_height * (factor as usize);
+
+        let mut new_data = vec![0u8; new_width * new_height * 4];
+
+        for old_y in 0..old_height {
+            for old_x in 0..old_width {
+                let old_idx = (old_y * old_width + old_x) * 4;
+                let pixel = [
+                    capture.data[old_idx],
+                    capture.data[old_idx + 1],
+                    capture.data[old_idx + 2],
+                    capture.data[old_idx + 3],
+                ];
+
+                for dy in 0..factor as usize {
+                    for dx in 0..factor as usize {
+                        let new_x = old_x * (factor as usize) + dx;
+                        let new_y = old_y * (factor as usize) + dy;
+                        let new_idx = (new_y * new_width + new_x) * 4;
+
+                        new_data[new_idx..new_idx + 4].copy_from_slice(&pixel);
+                    }
+                }
+            }
+        }
+
+        Ok(CaptureResult::new(
+            new_data,
+            new_width as u32,
+            new_height as u32,
+        ))
     }
 
     pub fn capture_outputs(
